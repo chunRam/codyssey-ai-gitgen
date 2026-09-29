@@ -191,3 +191,14 @@ def parse_pr(text: str) -> PRDraft:
         what=_clean_items(data.get("what")),
         how_to_test=_clean_items(data.get("how_to_test")),
     )
+
+
+def build_retry_prompt(user_prompt: str, previous_answer: str, violations: list[str]) -> str:
+    """검증에 실패했을 때 재요청용 입력: 원래 입력 + 이전 답변 + 위반 사항."""
+    violation_lines = "\n".join(f"- {item}" for item in violations)
+    return (
+        f"{user_prompt}\n\n"
+        f"[이전 답변]\n{previous_answer.strip()}\n\n"
+        f"[규칙 위반]\n{violation_lines}\n\n"
+        "위 규칙 위반을 모두 고쳐서, 같은 JSON 형식으로 다시 작성하라."
+    )
