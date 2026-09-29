@@ -16,6 +16,7 @@ COMMIT_TYPES = ["feat", "fix", "docs", "refactor", "test", "chore", "style", "pe
 COMMIT_TITLE_RECOMMENDED = 50
 COMMIT_TITLE_MAX = 72
 PR_TITLE_MAX = 80
+MASK_MARK = "[MASKED:"  # safety.py 가 민감정보를 가릴 때 쓰는 표시
 
 # ──────────────────────────────────────────────────────────────
 # 커밋 메시지
@@ -35,7 +36,6 @@ COMMIT_SYSTEM = f"""\
 
 [금지]
 - diff 에 없는 내용을 추측해서 쓰지 않는다.
-- [MASKED:...] 로 가려진 값을 복원하거나 추측하지 않는다.
 - "코드 수정", "업데이트" 처럼 무엇을 바꿨는지 알 수 없는 표현을 쓰지 않는다.
 
 [예시]
@@ -75,7 +75,6 @@ PR_SYSTEM = f"""\
 
 [금지]
 - diff 에 없는 내용을 추측해서 쓰지 않는다.
-- [MASKED:...] 로 가려진 값을 복원하거나 추측하지 않는다.
 
 [예시]
 {{"title": "feat: 커밋 메시지 자동 생성 기능 추가",
@@ -112,6 +111,12 @@ def build_user_prompt(changes: GitChanges, context: str = "") -> str:
     sections.append(f"[변경 범위]\n{changes.diff_source}")
     sections.append(f"[변경 파일] (상태: M=수정, A=추가, D=삭제, R=이름변경, ??=새 파일)\n{file_lines}")
     sections.append(f"[diff]\n{changes.diff.strip() or '(diff 없음: 새 파일만 있음)'}")
+    if MASK_MARK in changes.diff:
+        # 가려진 값이 실제로 있을 때만 안내한다. 항상 넣으면 AI 가 없는 표시를 흉내 내기도 한다.
+        sections.append(
+            f"[참고]\ndiff 의 {MASK_MARK}...] 표시는 보안상 가려진 값이다. "
+            "그 값을 추측하거나 답변에 인용하지 않는다."
+        )
     return "\n\n".join(sections)
 
 
