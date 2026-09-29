@@ -1,12 +1,12 @@
 # codyssey-ai-gitgen
 
-Git 변경 사항(`git status`, `git diff`)을 읽고 AI(Google Gemini)로 **커밋 메시지**와 **PR 제목/본문 초안**을 만들어 주는 터미널 도구입니다.
+Git 변경 사항(`git status`, `git diff`)을 읽고 AI(**Google Gemini** 또는 **OpenRouter**)로 **커밋 메시지**와 **PR 제목/본문 초안**을 만들어 주는 터미널 도구입니다.
 
 - 생성 결과는 **초안**입니다. 터미널에 출력만 하고 `git commit`, `git push`, PR 생성은 하지 않습니다. 내용을 검토한 뒤 직접 복사해서 쓰세요.
 - 표준 라이브러리만 사용하므로 `pip install`이 필요 없습니다.
 
 ```
-git status / git diff 수집 → (safe-mode) 마스킹·전송량 제한 → Gemini API 호출
+git status / git diff 수집 → (safe-mode) 마스킹·전송량 제한 → AI API 호출 (Gemini / OpenRouter)
   → 형식 검증 (위반 시 1회 재요청 → 후처리) → 구분선으로 나눠 출력
 ```
 
@@ -14,7 +14,7 @@ git status / git diff 수집 → (safe-mode) 마스킹·전송량 제한 → Gem
 
 ## 1. 설치
 
-**요구 사항:** Python 3.10 이상, Git, Gemini API Key
+**요구 사항:** Python 3.10 이상, Git, Gemini 또는 OpenRouter API Key (둘 중 하나)
 
 ```bash
 git clone https://github.com/chunRam/codyssey-ai-gitgen.git
@@ -24,21 +24,36 @@ python3 --version   # 3.10 이상인지 확인
 
 ## 2. API Key 설정 (환경변수)
 
-API Key는 **환경변수 `GEMINI_API_KEY`로만** 읽습니다. 코드나 레포에 키를 적지 마세요.
+API Key는 **환경변수로만** 읽습니다. 코드나 레포에 키를 적지 마세요. 두 공급자 중 **하나만 등록해도** 됩니다.
 
-1. https://aistudio.google.com/apikey 에서 키를 발급받습니다.
-2. 셸 설정 파일에 추가하고 다시 불러옵니다.
+| 공급자 | 환경변수 | 키 발급 | 특징 |
+|---|---|---|---|
+| Google Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey | 무료 티어 있음 (요청 수 제한) |
+| OpenRouter | `OPENROUTER_API_KEY` | https://openrouter.ai/settings/keys | 키 하나로 여러 회사 모델 사용, 크레딧 충전 방식 (`:free` 무료 모델도 있음) |
+
+셸 설정 파일에 추가하고 다시 불러옵니다.
 
 ```bash
-# zsh (macOS 기본)
+# zsh (macOS 기본) — 사용할 공급자의 줄만 추가하면 됩니다
 echo 'export GEMINI_API_KEY="발급받은_키"' >> ~/.zshrc
+echo 'export OPENROUTER_API_KEY="발급받은_키"' >> ~/.zshrc
 source ~/.zshrc
 
 # 설정 확인: 키 전체를 출력하지 말고 앞부분만 확인하세요
-echo ${GEMINI_API_KEY:0:4}
+echo ${GEMINI_API_KEY:0:4} ${OPENROUTER_API_KEY:0:6}
 ```
 
 > `.zshrc`에 추가할 때 따옴표 짝이 맞는지 확인하세요. 따옴표가 하나 빠지면 `unmatched "` 오류가 납니다.
+
+**어떤 공급자를 쓰나요?** `--provider`로 정합니다. 기본값 `auto`는 키가 설정된 공급자를 **gemini → openrouter 순서**로 찾아 씁니다.
+
+```bash
+python3 main.py commit                          # auto: 등록된 키에 따라 자동 선택
+python3 main.py commit --provider openrouter    # OpenRouter 강제
+python3 main.py commit --provider openrouter --model openai/gpt-4o-mini   # 다른 회사 모델
+```
+
+OpenRouter의 모델 이름은 `회사/모델` 형식입니다(예: `google/gemini-2.5-flash`, `openai/gpt-4o-mini`). 목록은 https://openrouter.ai/models 에서 확인하세요. 이 도구는 답을 JSON 구조로 받으므로 **structured outputs를 지원하는 모델**을 고르세요.
 
 ## 3. 실행 방법
 
@@ -61,10 +76,11 @@ python3 ~/codyssey-ai-gitgen/main.py pr           # PR 제목/본문 생성
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `--model` | `gemini-2.5-flash` | 사용할 Gemini 모델 |
+| `--provider` | `auto` | AI 공급자: `auto`, `gemini`, `openrouter` |
+| `--model` | gemini: `gemini-2.5-flash`<br>openrouter: `google/gemini-2.5-flash` | 사용할 모델 |
 | `--temperature` | `0.3` | 0.0~2.0. 낮을수록 매번 비슷한 결과, 높을수록 표현이 다양해짐 |
 | `--max-tokens` | `2048` | 응답 최대 토큰 수 (추론 토큰 포함) |
-| `--thinking-budget` | `0` | gemini-2.5 계열의 추론 토큰 예산. `0`=끔, `-1`=모델이 자동 결정 |
+| `--thinking-budget` | `0` | 추론 토큰 예산(gemini-2.5 계열, OpenRouter 추론 모델). `0`=끔, `-1`=모델이 자동 결정 |
 | `--context` | (없음) | 변경 이유 등 diff만으로 알 수 없는 맥락 |
 | `--safe-mode` | 꺼짐 | 민감정보 마스킹 + diff 전송량 제한 ([6. 민감정보 대응](#6-민감정보-대응-safe-mode) 참고) |
 | `--base` (pr 전용) | `main` | 비교 기준 브랜치 |
@@ -103,7 +119,7 @@ AI의 첫 답이 규칙(본문 불릿 2개 이하)을 어겨서, 위반 내용�
 
 ```text
 $ python3 main.py commit --safe-mode
-[INFO] 설정: model=gemini-2.5-flash, temperature=0.3, max_tokens=2048, thinking_budget=0, safe_mode=True
+[INFO] 설정: provider=auto, model=(공급자 기본값), temperature=0.3, max_tokens=2048, thinking_budget=0, safe_mode=True
 [INFO] Git status 수집 완료: 3개 파일 변경 감지
           A formatter.py
           M main.py
@@ -112,12 +128,12 @@ $ python3 main.py commit --safe-mode
 [SAFE] 마스킹 대상 없음
 [SAFE] 전송량 제한: 파일 0개, 157줄 제외 (최대 10개 파일 / 200줄)
 [SAFE] AI 전송 예정 diff: 201줄
-[INFO] AI API 요청 중... (model=gemini-2.5-flash)
+[INFO] AI API 요청 중... (provider=gemini, model=gemini-2.5-flash)
 [INFO] 토큰 사용량: 입력 2841 / 출력 87 / 추론 0 (finishReason=STOP)
 [CHECK] 규칙 위반 1건:
          - 본문 불릿이 3개입니다. 핵심 변경 2개 이내로 줄여야 합니다.
 [INFO] 위반 내용을 알려주고 1회 재요청합니다.
-[INFO] AI API 요청 중... (model=gemini-2.5-flash)
+[INFO] AI API 요청 중... (provider=gemini, model=gemini-2.5-flash)
 [INFO] 토큰 사용량: 입력 2986 / 출력 68 / 추론 0 (finishReason=STOP)
 [CHECK] 형식 검증 통과
 [INFO] AI API 호출 횟수: 2회 (최대 2회)
@@ -135,14 +151,14 @@ feat: 커밋/PR 메시지 검증 및 후처리 기능 추가
 
 ```text
 $ python3 main.py pr --safe-mode --context "사용자 피드백: 프로그램 종료 시 인사가 없어 어색하다는 의견"
-[INFO] 설정: model=gemini-2.5-flash, temperature=0.3, max_tokens=2048, thinking_budget=0, safe_mode=True
+[INFO] 설정: provider=auto, model=(공급자 기본값), temperature=0.3, max_tokens=2048, thinking_budget=0, safe_mode=True
 [INFO] 현재 브랜치: feature/farewell (기준: main)
 [INFO] Git status 수집 완료: 1개 파일 변경 감지
           M hello.py
 [INFO] Git diff 수집 완료: 10줄 (main...HEAD)
 [SAFE] 마스킹 대상 없음
 [SAFE] AI 전송 예정 diff: 10줄
-[INFO] AI API 요청 중... (model=gemini-2.5-flash)
+[INFO] AI API 요청 중... (provider=gemini, model=gemini-2.5-flash)
 [INFO] 토큰 사용량: 입력 595 / 출력 89 / 추론 0 (finishReason=STOP)
 [CHECK] 형식 검증 통과
 [INFO] AI API 호출 횟수: 1회 (최대 2회)
@@ -177,14 +193,17 @@ AI를 호출하지 않으므로 비용이 들지 않습니다.
 오류는 `[ERROR] 원인`과 `[HINT] 해결 방법`으로 출력하고, 0이 아닌 종료 코드로 끝납니다.
 
 ```text
-[ERROR] GEMINI_API_KEY 환경변수가 설정되지 않았습니다.
-[HINT] 예) export GEMINI_API_KEY="YOUR_KEY"
+[ERROR] API Key 환경변수가 설정되지 않았습니다. (GEMINI_API_KEY 또는 OPENROUTER_API_KEY)
+[HINT] 예) export GEMINI_API_KEY="YOUR_KEY"  또는  export OPENROUTER_API_KEY="YOUR_KEY"
 
 [ERROR] 현재 디렉토리는 Git 저장소가 아닙니다.
 [HINT] git init 으로 초기화된 프로젝트 루트에서 실행하세요.
 
 [ERROR] API Key 가 유효하지 않습니다 [HTTP 400] (API key not valid. Please pass a valid API key.)
 [HINT] GEMINI_API_KEY 값을 확인하거나 키를 재발급하세요.
+
+[ERROR] API Key 가 유효하지 않습니다 [HTTP 401] (User not found.)
+[HINT] OPENROUTER_API_KEY 값을 확인하거나 키를 재발급하세요.
 
 [ERROR] AI 서버 오류입니다 [HTTP 503] (This model is currently experiencing high demand. ...)
 [HINT] 서버 측 문제입니다. 잠시 후 다시 시도하세요.
@@ -226,7 +245,7 @@ AI의 답을 그대로 쓰지 않고 아래 규칙으로 검사합니다.
 
 | 정책 | 내용 |
 |---|---|
-| (A) 마스킹 | API Key 형태의 토큰(Google `AIza…`/`AQ.…`, OpenAI `sk-…`, GitHub `ghp_…`, AWS `AKIA…`, Slack `xox…`)과 이메일 주소를 `[MASKED:종류]`로 바꿈 |
+| (A) 마스킹 | API Key 형태의 토큰(Google `AIza…`/`AQ.…`, OpenAI·OpenRouter `sk-…`, GitHub `ghp_…`, AWS `AKIA…`, Slack `xox…`)과 이메일 주소를 `[MASKED:종류]`로 바꿈 |
 | (B) 전송량 제한 | diff를 **최대 10개 파일, 200줄**까지만 전송하고 나머지는 생략 |
 
 ```text
@@ -253,7 +272,8 @@ AI의 답을 그대로 쓰지 않고 아래 규칙으로 검사합니다.
 | 1회 실행당 호출 수 | **최대 2회** (첫 요청 1회 + 형식 위반 시 재요청 1회). 실행할 때마다 `[INFO] AI API 호출 횟수`로 표시 |
 | 변경 없음 | AI를 호출하지 않고 종료 |
 | 토큰 사용량 | 실행할 때마다 `입력 / 출력 / 추론` 토큰 수를 표시. 비용은 토큰 수에 비례 |
-| 무료 티어 한도 | 모델별로 요청 수 제한이 있습니다. 개발 중 `gemini-2.5-flash` 무료 티어에서 **요청 20회 한도**를 넘어 `HTTP 429`가 발생했습니다. 최신 한도는 [공식 문서](https://ai.google.dev/gemini-api/docs/rate-limits)를 확인하세요 |
+| OpenRouter 크레딧 | 사용량만큼 크레딧이 차감됩니다. 크레딧이 부족하면 `HTTP 402` 안내가 나오며, `:free`로 끝나는 무료 모델을 `--model`로 지정할 수도 있습니다 |
+| Gemini 무료 티어 한도 | 모델별로 요청 수 제한이 있습니다. 개발 중 `gemini-2.5-flash` 무료 티어에서 **요청 20회 한도**를 넘어 `HTTP 429`가 발생했습니다. 최신 한도는 [공식 문서](https://ai.google.dev/gemini-api/docs/rate-limits)를 확인하세요 |
 
 **권장 사용법**
 - 큰 변경은 `--safe-mode`로 전송량을 줄이세요. 비용도 줄고 민감정보 노출도 막습니다.
@@ -270,7 +290,7 @@ codyssey-ai-gitgen/
 ├── main.py        CLI 진입점: 옵션 해석, 전체 흐름(수집 → 안전 처리 → AI → 검증 → 출력)
 ├── git_utils.py   git status / diff 수집, 저장소 루트 확인
 ├── safety.py      safe-mode: 마스킹, 전송량 제한
-├── ai_client.py   Gemini REST API 호출(urllib), HTTP·네트워크 오류 처리
+├── ai_client.py   AI REST API 호출(urllib): Gemini / OpenRouter, HTTP·네트워크 오류 처리
 ├── prompts.py     커밋/PR 프롬프트(역할·형식·금지·예시), 응답 JSON 스키마, 파싱
 └── formatter.py   형식 검증, 후처리, 구분선 출력
 ```

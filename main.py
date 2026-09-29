@@ -15,15 +15,15 @@ import formatter
 import git_utils
 import prompts
 import safety
-from ai_client import AIError, AIResponse, GeminiClient
+from ai_client import AIError, AIResponse, BaseClient
 from formatter import ValidationResult
 from git_utils import GitChanges, GitError
 
 # 기본 API 파라미터 (CLI 옵션으로 덮어쓸 수 있다)
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_PROVIDER = ai_client.AUTO_PROVIDER
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_TOKENS = 2048
-DEFAULT_THINKING_BUDGET = 0  # 0 = 추론 끔 (gemini-2.5 계열에만 적용)
+DEFAULT_THINKING_BUDGET = 0  # 0 = 추론 끔
 DEFAULT_BASE_BRANCH = "main"
 MAX_LISTED_FILES = 10  # 화면에 나열할 변경 파일 수
 MAX_API_CALLS = 2      # 1회 실행당 최대 AI 호출 수 (첫 요청 1 + 검증 실패 시 재요청 1)
@@ -72,9 +72,22 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     api = common.add_argument_group("AI API 옵션")
     api.add_argument(
+        "--provider",
+        choices=[ai_client.AUTO_PROVIDER, *ai_client.PROVIDERS],
+        default=DEFAULT_PROVIDER,
+        help=(
+            "AI 공급자. auto 는 API Key 가 설정된 공급자를 gemini → openrouter 순으로 사용 "
+            f"(기본값: {DEFAULT_PROVIDER})"
+        ),
+    )
+    api.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
-        help=f"사용할 Gemini 모델 (기본값: {DEFAULT_MODEL})",
+        default=None,
+        help=(
+            "사용할 모델 (기본값: gemini 는 "
+            f"{ai_client.GeminiClient.default_model}, openrouter 는 "
+            f"{ai_client.OpenRouterClient.default_model})"
+        ),
     )
     api.add_argument(
         "--temperature",
@@ -93,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=thinking_budget_type,
         default=DEFAULT_THINKING_BUDGET,
         help=(
-            "gemini-2.5 계열의 추론 토큰 예산. 0=끔, -1=자동 "
+            "추론 토큰 예산 (gemini-2.5 계열, OpenRouter 추론 모델). 0=끔, -1=자동 "
             f"(기본값: {DEFAULT_THINKING_BUDGET})"
         ),
     )
@@ -148,7 +161,8 @@ def print_error(message: str, hint: str = "") -> None:
 
 def print_settings(args: argparse.Namespace) -> None:
     print(
-        f"[INFO] 설정: model={args.model}, temperature={args.temperature}, "
+        f"[INFO] 설정: provider={args.provider}, model={args.model or '(공급자 기본값)'}, "
+        f"temperature={args.temperature}, "
         f"max_tokens={args.max_tokens}, thinking_budget={args.thinking_budget}, "
         f"safe_mode={args.safe_mode}"
     )
@@ -194,10 +208,10 @@ def apply_safety(args: argparse.Namespace, changes: GitChanges) -> GitChanges:
     return safe_changes
 
 
-def create_client(args: argparse.Namespace) -> GeminiClient | None:
+def create_client(args: argparse.Namespace) -> BaseClient | None:
     try:
-        return ai_client.GeminiClient(
-            args.model, args.temperature, args.max_tokens, args.thinking_budget
+        return ai_client.create_client(
+            args.provider, args.model, args.temperature, args.max_tokens, args.thinking_budget
         )
     except AIError as error:  # API Key 미설정
         print_error(error.message, error.hint)
@@ -205,10 +219,10 @@ def create_client(args: argparse.Namespace) -> GeminiClient | None:
 
 
 def call_ai(
-    client: GeminiClient, system: str, prompt: str, schema: dict
+    client: BaseClient, system: str, prompt: str, schema: dict
 ) -> AIResponse | None:
     """AI 를 1회 호출한다. 실패하거나 답변이 잘리면 오류를 출력하고 None."""
-    print(f"[INFO] AI API 요청 중... (model={client.model})")
+    print(f"[INFO] AI API 요청 중... (provider={client.provider}, model={client.model})")
     try:
         response = client.generate(system, prompt, schema)
     except AIError as error:
@@ -219,7 +233,7 @@ def call_ai(
         f"[INFO] 토큰 사용량: 입력 {response.prompt_tokens} / 출력 {response.output_tokens}"
         f" / 추론 {response.thinking_tokens} (finishReason={response.finish_reason})"
     )
-    if response.finish_reason == "MAX_TOKENS":
+    if response.truncated:
         # JSON 답변이 중간에 잘리면 쓸 수 없으므로 오류로 처리한다.
         print_error(
             f"답변이 길이 제한({client.max_tokens} 토큰)에 걸려 중간에 잘렸습니다.",
