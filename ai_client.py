@@ -253,11 +253,27 @@ def to_json_schema(schema: dict) -> dict:
     return converted
 
 
+FREE_SUFFIX = ":free"
+
+
 class OpenRouterClient(BaseClient):
+    """OpenRouter 호출기. 과금을 막기 위해 무료 모델(':free')만 허용한다."""
+
     provider = "openrouter"
     key_env = "OPENROUTER_API_KEY"
-    default_model = "google/gemini-2.5-flash"
+    # OpenRouter 주간 사용량 순위(2026-09 기준)에서 가장 많이 쓰이는 무료 모델
+    default_model = "nvidia/nemotron-3-ultra-550b-a55b:free"
     api_url = "https://openrouter.ai/api/v1/chat/completions"
+
+    def __init__(self, model, temperature, max_tokens, thinking_budget=None, timeout=DEFAULT_TIMEOUT):
+        chosen = model or self.default_model
+        if not chosen.endswith(FREE_SUFFIX):
+            raise AIError(
+                f"OpenRouter 는 무료 모델만 사용하도록 설정되어 있습니다: '{chosen}'",
+                f"이름이 '{FREE_SUFFIX}' 로 끝나는 모델을 지정하세요. "
+                f"(예: --model {self.default_model}, 목록: https://openrouter.ai/models?max_price=0)",
+            )
+        super().__init__(chosen, temperature, max_tokens, thinking_budget, timeout)
 
     def build_request(self, system, prompt, schema):
         body: dict = {
@@ -271,6 +287,7 @@ class OpenRouterClient(BaseClient):
         }
         if schema is not None:
             # 답을 정해진 구조의 JSON 으로만 달라고 요청한다.
+            # 지원하지 않는 모델에서는 무시되므로, 프롬프트에도 JSON 형식을 적어 두고 파싱 시 JSON 만 뽑아낸다.
             body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {"name": "draft", "strict": True, "schema": to_json_schema(schema)},
@@ -294,14 +311,13 @@ class OpenRouterClient(BaseClient):
         if code == 401:
             return AIError(f"API Key 가 유효하지 않습니다 [HTTP {code}]{suffix}",
                            f"{self.key_env} 값을 확인하거나 키를 재발급하세요.")
-        if code == 402:
-            return AIError(f"OpenRouter 크레딧이 부족합니다 [HTTP {code}]{suffix}",
-                           "https://openrouter.ai/settings/credits 에서 크레딧을 충전하거나 "
-                           "무료 모델(이름이 ':free' 로 끝나는 모델)을 --model 로 지정하세요.")
-        if code == 400 and "model" in detail.lower():
+        if code == 429:
+            return AIError(f"무료 모델 요청 한도를 초과했습니다 [HTTP {code}]{suffix}",
+                           "무료 모델은 분당·일일 요청 수 제한이 있습니다. 잠시 후 다시 시도하거나 "
+                           "--model 로 다른 무료 모델을 지정하세요.")
+        if code in (400, 404) and "model" in detail.lower():
             return AIError(f"모델 '{self.model}' 을 사용할 수 없습니다 [HTTP {code}]{suffix}",
-                           f"--model 에 'google/gemini-2.5-flash' 처럼 '회사/모델' 형식의 ID 를 쓰세요. "
-                           "목록: https://openrouter.ai/models")
+                           "무료 모델 목록에서 ID 를 확인하세요: https://openrouter.ai/models?max_price=0")
         return None
 
     def parse_response(self, data):

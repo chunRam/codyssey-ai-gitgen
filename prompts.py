@@ -38,6 +38,9 @@ COMMIT_SYSTEM = f"""\
 - diff 에 없는 내용을 추측해서 쓰지 않는다.
 - "코드 수정", "업데이트" 처럼 무엇을 바꿨는지 알 수 없는 표현을 쓰지 않는다.
 
+[출력]
+- 아래 예시와 같은 키(title, body)를 가진 JSON 객체 하나만 출력한다. 코드블록(```)이나 설명 문장을 붙이지 않는다.
+
 [예시]
 {{"title": "feat: 로그인 실패 시 재시도 안내 메시지 추가",
  "body": ["auth.py 의 login() 이 실패 횟수를 세고 3회 이상이면 안내 문구를 반환하도록 변경",
@@ -75,6 +78,9 @@ PR_SYSTEM = f"""\
 
 [금지]
 - diff 에 없는 내용을 추측해서 쓰지 않는다.
+
+[출력]
+- 아래 예시와 같은 키(title, why, what, how_to_test)를 가진 JSON 객체 하나만 출력한다. 코드블록(```)이나 설명 문장을 붙이지 않는다.
 
 [예시]
 {{"title": "feat: 커밋 메시지 자동 생성 기능 추가",
@@ -154,9 +160,21 @@ class PRDraft:
         return "\n\n".join(blocks)
 
 
+def _extract_json(text: str) -> str:
+    """답변에서 JSON 객체 부분만 꺼낸다.
+
+    JSON 구조 강제(structured outputs)를 지원하지 않는 모델은 ```json 코드블록이나
+    앞뒤 설명 문장을 붙여 답하기도 하므로, 처음 '{' 부터 마지막 '}' 까지를 잘라낸다.
+    """
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end < start:
+        return text
+    return text[start:end + 1]
+
+
 def _load_json(text: str) -> dict:
     try:
-        data = json.loads(text)
+        data = json.loads(_extract_json(text))
     except json.JSONDecodeError:
         raise AIError("AI 응답이 JSON 형식이 아닙니다.", "다시 실행하거나 --temperature 를 낮춰 보세요.")
     if not isinstance(data, dict):
