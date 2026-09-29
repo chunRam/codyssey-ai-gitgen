@@ -11,6 +11,7 @@ import argparse
 import sys
 
 import git_utils
+import safety
 from git_utils import GitChanges, GitError
 
 # 기본 API 파라미터 (CLI 옵션으로 덮어쓸 수 있다)
@@ -18,6 +19,7 @@ DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_BASE_BRANCH = "main"
+MAX_LISTED_FILES = 10  # 화면에 나열할 변경 파일 수
 
 # 종료 코드: 0 = 정상, 그 외 = 오류
 EXIT_OK = 0
@@ -122,12 +124,41 @@ def print_settings(args: argparse.Namespace) -> None:
 def report_changes(changes: GitChanges) -> None:
     """수집한 git 변경 사항을 요약해서 보여준다."""
     print(f"[INFO] Git status 수집 완료: {len(changes.files)}개 파일 변경 감지")
-    for change in changes.files:
+    for change in changes.files[:MAX_LISTED_FILES]:
         print(f"         {change.status:>2} {change.path}")
+    if len(changes.files) > MAX_LISTED_FILES:
+        print(f"         ... 외 {len(changes.files) - MAX_LISTED_FILES}개")
     print(
         f"[INFO] Git diff 수집 완료: {changes.diff_line_count}줄 "
         f"({changes.diff_source})"
     )
+
+
+def apply_safety(args: argparse.Namespace, changes: GitChanges) -> GitChanges:
+    """--safe-mode 면 마스킹·전송량 제한을 적용하고, 꺼져 있으면 민감정보 의심 시 경고만 한다."""
+    if not args.safe_mode:
+        suspected = safety.count_secrets(changes.diff)
+        if suspected:
+            print(
+                f"[WARN] diff 에 민감정보로 의심되는 패턴 {suspected}건이 있습니다. "
+                "--safe-mode 사용을 권장합니다."
+            )
+        return changes
+
+    safe_changes, report = safety.apply_safe_mode(changes)
+    if report.masked_total:
+        detail = ", ".join(f"{name} {count}" for name, count in report.masked.items())
+        print(f"[SAFE] 민감정보 {report.masked_total}건 마스킹: {detail}")
+    else:
+        print("[SAFE] 마스킹 대상 없음")
+    if report.omitted_files or report.omitted_lines:
+        print(
+            f"[SAFE] 전송량 제한: 파일 {report.omitted_files}개, "
+            f"{report.omitted_lines}줄 제외 (최대 {safety.MAX_FILES}개 파일 / "
+            f"{safety.MAX_LINES}줄)"
+        )
+    print(f"[SAFE] AI 전송 예정 diff: {safe_changes.diff_line_count}줄")
+    return safe_changes
 
 
 def run_commit(args: argparse.Namespace) -> int:
@@ -145,7 +176,8 @@ def run_commit(args: argparse.Namespace) -> int:
     report_changes(changes)
     if not changes.diff.strip():
         print("[HINT] 새 파일만 있어 diff 가 비어 있습니다. git add 후 실행하면 파일 내용까지 반영됩니다.")
-    # TODO(3~6단계): safe-mode → AI 호출 → 검증 → 출력
+    changes = apply_safety(args, changes)
+    # TODO(4~6단계): AI 호출 → 검증 → 출력
     return EXIT_OK
 
 
@@ -163,7 +195,8 @@ def run_pr(args: argparse.Namespace) -> int:
         print("[INFO] 변경 사항이 없습니다. PR 초안을 생성하지 않고 종료합니다.")
         return EXIT_OK
     report_changes(changes)
-    # TODO(3~6단계): safe-mode → AI 호출 → 검증 → 출력
+    changes = apply_safety(args, changes)
+    # TODO(4~6단계): AI 호출 → 검증 → 출력
     return EXIT_OK
 
 
