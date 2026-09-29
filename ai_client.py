@@ -47,6 +47,11 @@ def get_api_key() -> str:
     return key
 
 
+def supports_thinking_budget(model: str) -> bool:
+    """thinkingBudget 설정은 gemini-2.5 계열 모델에서 쓰는 방식이다."""
+    return model.startswith("gemini-2.5")
+
+
 class GeminiClient:
     """Gemini generateContent 호출기. 호출 횟수(call_count)를 센다."""
 
@@ -55,33 +60,43 @@ class GeminiClient:
         model: str,
         temperature: float,
         max_tokens: int,
+        thinking_budget: int | None = None,
         timeout: int = DEFAULT_TIMEOUT,
     ) -> None:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        # 추론(thinking) 토큰 예산. 0 = 추론 끔, -1 = 모델이 자동 결정, None = 설정 안 보냄.
+        # 추론 토큰도 max_tokens 한도에 포함되므로, 끄면 한도를 답변에 모두 쓸 수 있다.
+        self.thinking_budget = thinking_budget if supports_thinking_budget(model) else None
         self.timeout = timeout
         self.api_key = get_api_key()
         self.call_count = 0
 
-    def build_body(self, system: str, prompt: str, json_mode: bool) -> dict:
+    def build_body(self, system: str, prompt: str, schema: dict | None) -> dict:
         """요청 본문(JSON) 구성: 지시문 + 사용자 입력 + 생성 파라미터."""
         generation_config: dict = {
             "temperature": self.temperature,
             "maxOutputTokens": self.max_tokens,
         }
-        if json_mode:
-            # 답을 JSON 형식으로만 달라고 요청한다 → 프로그램이 파싱하기 쉽다.
+        if schema is not None:
+            # 답을 정해진 구조의 JSON 으로만 달라고 요청한다 → 프로그램이 파싱하기 쉽다.
             generation_config["responseMimeType"] = "application/json"
+            generation_config["responseSchema"] = schema
+        if self.thinking_budget is not None:
+            generation_config["thinkingConfig"] = {"thinkingBudget": self.thinking_budget}
         return {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": generation_config,
         }
 
-    def generate(self, system: str, prompt: str, json_mode: bool = False) -> AIResponse:
-        """AI 에 요청을 보내고 응답을 AIResponse 로 돌려준다. 실패하면 AIError."""
-        body = json.dumps(self.build_body(system, prompt, json_mode)).encode("utf-8")
+    def generate(self, system: str, prompt: str, schema: dict | None = None) -> AIResponse:
+        """AI 에 요청을 보내고 응답을 AIResponse 로 돌려준다. 실패하면 AIError.
+
+        schema: 답변 JSON 구조(OpenAPI 스키마). 주면 JSON 으로, 없으면 자유 텍스트로 답한다.
+        """
+        body = json.dumps(self.build_body(system, prompt, schema)).encode("utf-8")
         request = urllib.request.Request(
             API_URL.format(model=self.model),
             data=body,
@@ -166,7 +181,7 @@ class GeminiClient:
             if finish_reason == "MAX_TOKENS":
                 raise AIError(
                     f"답변이 길이 제한({self.max_tokens} 토큰)에 걸려 비어 있습니다.",
-                    "--max-tokens 값을 늘려 다시 실행하세요. (2.5 계열은 내부 추론 토큰도 포함됨)",
+                    "--max-tokens 를 늘리거나 --thinking-budget 0 으로 추론을 끄세요. (추론 토큰도 한도에 포함됨)",
                 )
             raise AIError(f"AI 가 빈 응답을 돌려주었습니다 (finishReason={finish_reason or '없음'}).")
 
