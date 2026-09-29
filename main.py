@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import sys
 
+import ai_client
 import git_utils
 import safety
+from ai_client import AIError, AIResponse
 from git_utils import GitChanges, GitError
 
 # 기본 API 파라미터 (CLI 옵션으로 덮어쓸 수 있다)
@@ -161,6 +163,41 @@ def apply_safety(args: argparse.Namespace, changes: GitChanges) -> GitChanges:
     return safe_changes
 
 
+# 임시 프롬프트: 4단계에서는 AI 호출 흐름만 확인한다. (5단계에서 prompts.py 로 교체)
+TEMP_SYSTEM = "너는 코드 변경 사항을 요약하는 도우미다. 한국어로 3줄 이내로 답한다."
+
+
+def build_temp_prompt(changes: GitChanges) -> str:
+    file_list = "\n".join(f"- {c.status} {c.path}" for c in changes.files)
+    return f"[변경 파일]\n{file_list}\n\n[diff]\n{changes.diff}"
+
+
+def request_ai(args: argparse.Namespace, system: str, prompt: str) -> AIResponse | None:
+    """AI 를 호출하고 응답을 돌려준다. 실패하면 오류를 출력하고 None."""
+    try:
+        client = ai_client.GeminiClient(args.model, args.temperature, args.max_tokens)
+    except AIError as error:  # API Key 미설정
+        print_error(error.message, error.hint)
+        return None
+
+    print(f"[INFO] AI API 요청 중... (model={args.model})")
+    try:
+        response = client.generate(system, prompt)
+    except AIError as error:
+        print_error(error.message, error.hint)
+        return None
+    finally:
+        print(f"[INFO] AI API 호출 횟수: {client.call_count}회")
+
+    print(
+        f"[INFO] 토큰 사용량: 입력 {response.prompt_tokens} / 출력 {response.output_tokens}"
+        f" / 추론 {response.thinking_tokens} (finishReason={response.finish_reason})"
+    )
+    if response.finish_reason == "MAX_TOKENS":
+        print("[WARN] 답변이 길이 제한에 걸려 잘렸을 수 있습니다. --max-tokens 를 늘려 보세요.")
+    return response
+
+
 def run_commit(args: argparse.Namespace) -> int:
     print_settings(args)
     try:
@@ -177,7 +214,13 @@ def run_commit(args: argparse.Namespace) -> int:
     if not changes.diff.strip():
         print("[HINT] 새 파일만 있어 diff 가 비어 있습니다. git add 후 실행하면 파일 내용까지 반영됩니다.")
     changes = apply_safety(args, changes)
-    # TODO(4~6단계): AI 호출 → 검증 → 출력
+
+    response = request_ai(args, TEMP_SYSTEM, build_temp_prompt(changes))
+    if response is None:
+        return EXIT_ERROR
+    print("[DONE] AI 응답 수신\n")
+    print(response.text.strip())
+    # TODO(5~6단계): 커밋 메시지 프롬프트 → 검증 → 구획 출력
     return EXIT_OK
 
 
@@ -196,7 +239,13 @@ def run_pr(args: argparse.Namespace) -> int:
         return EXIT_OK
     report_changes(changes)
     changes = apply_safety(args, changes)
-    # TODO(4~6단계): AI 호출 → 검증 → 출력
+
+    response = request_ai(args, TEMP_SYSTEM, build_temp_prompt(changes))
+    if response is None:
+        return EXIT_ERROR
+    print("[DONE] AI 응답 수신\n")
+    print(response.text.strip())
+    # TODO(5~6단계): PR 프롬프트 → 검증 → 구획 출력
     return EXIT_OK
 
 
