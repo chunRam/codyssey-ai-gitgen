@@ -12,6 +12,7 @@ import sys
 
 import ai_client
 import git_utils
+import prompts
 import safety
 from ai_client import AIError, AIResponse
 from git_utils import GitChanges, GitError
@@ -20,6 +21,7 @@ from git_utils import GitChanges, GitError
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_TOKENS = 2048
+DEFAULT_THINKING_BUDGET = 0  # 0 = 추론 끔 (gemini-2.5 계열에만 적용)
 DEFAULT_BASE_BRANCH = "main"
 MAX_LISTED_FILES = 10  # 화면에 나열할 변경 파일 수
 
@@ -51,6 +53,17 @@ def positive_int(value: str) -> int:
     return number
 
 
+def thinking_budget_type(value: str) -> int:
+    """--thinking-budget 값 검증: -1(자동) 또는 0 이상의 정수만 허용한다."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"정수가 아닙니다: {value}")
+    if number < -1:
+        raise argparse.ArgumentTypeError("-1(자동) 또는 0 이상이어야 합니다.")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     # commit / pr 이 공통으로 쓰는 옵션을 부모 파서에 모아 중복을 없앤다.
     common = argparse.ArgumentParser(add_help=False)
@@ -70,7 +83,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-tokens",
         type=positive_int,
         default=DEFAULT_MAX_TOKENS,
-        help=f"응답 최대 토큰 수 (기본값: {DEFAULT_MAX_TOKENS})",
+        help=f"응답 최대 토큰 수, 추론 토큰 포함 (기본값: {DEFAULT_MAX_TOKENS})",
+    )
+    api.add_argument(
+        "--thinking-budget",
+        type=thinking_budget_type,
+        default=DEFAULT_THINKING_BUDGET,
+        help=(
+            "gemini-2.5 계열의 추론 토큰 예산. 0=끔, -1=자동 "
+            f"(기본값: {DEFAULT_THINKING_BUDGET})"
+        ),
+    )
+    common.add_argument(
+        "--context",
+        default="",
+        help='변경 이유 등 AI 에 추가로 알려줄 맥락 (예: --context "로그인 오류 신고 대응")',
     )
     safety = common.add_argument_group("보안 옵션")
     safety.add_argument(
@@ -119,7 +146,8 @@ def print_error(message: str, hint: str = "") -> None:
 def print_settings(args: argparse.Namespace) -> None:
     print(
         f"[INFO] 설정: model={args.model}, temperature={args.temperature}, "
-        f"max_tokens={args.max_tokens}, safe_mode={args.safe_mode}"
+        f"max_tokens={args.max_tokens}, thinking_budget={args.thinking_budget}, "
+        f"safe_mode={args.safe_mode}"
     )
 
 
@@ -163,26 +191,21 @@ def apply_safety(args: argparse.Namespace, changes: GitChanges) -> GitChanges:
     return safe_changes
 
 
-# 임시 프롬프트: 4단계에서는 AI 호출 흐름만 확인한다. (5단계에서 prompts.py 로 교체)
-TEMP_SYSTEM = "너는 코드 변경 사항을 요약하는 도우미다. 한국어로 3줄 이내로 답한다."
-
-
-def build_temp_prompt(changes: GitChanges) -> str:
-    file_list = "\n".join(f"- {c.status} {c.path}" for c in changes.files)
-    return f"[변경 파일]\n{file_list}\n\n[diff]\n{changes.diff}"
-
-
-def request_ai(args: argparse.Namespace, system: str, prompt: str) -> AIResponse | None:
+def request_ai(
+    args: argparse.Namespace, system: str, prompt: str, schema: dict
+) -> AIResponse | None:
     """AI 를 호출하고 응답을 돌려준다. 실패하면 오류를 출력하고 None."""
     try:
-        client = ai_client.GeminiClient(args.model, args.temperature, args.max_tokens)
+        client = ai_client.GeminiClient(
+            args.model, args.temperature, args.max_tokens, args.thinking_budget
+        )
     except AIError as error:  # API Key 미설정
         print_error(error.message, error.hint)
         return None
 
     print(f"[INFO] AI API 요청 중... (model={args.model})")
     try:
-        response = client.generate(system, prompt)
+        response = client.generate(system, prompt, schema)
     except AIError as error:
         print_error(error.message, error.hint)
         return None
@@ -194,7 +217,12 @@ def request_ai(args: argparse.Namespace, system: str, prompt: str) -> AIResponse
         f" / 추론 {response.thinking_tokens} (finishReason={response.finish_reason})"
     )
     if response.finish_reason == "MAX_TOKENS":
-        print("[WARN] 답변이 길이 제한에 걸려 잘렸을 수 있습니다. --max-tokens 를 늘려 보세요.")
+        # JSON 답변이 중간에 잘리면 쓸 수 없으므로 오류로 처리한다.
+        print_error(
+            f"답변이 길이 제한({args.max_tokens} 토큰)에 걸려 중간에 잘렸습니다.",
+            "--max-tokens 를 늘리거나 --thinking-budget 0 으로 추론을 끄세요.",
+        )
+        return None
     return response
 
 
@@ -215,12 +243,18 @@ def run_commit(args: argparse.Namespace) -> int:
         print("[HINT] 새 파일만 있어 diff 가 비어 있습니다. git add 후 실행하면 파일 내용까지 반영됩니다.")
     changes = apply_safety(args, changes)
 
-    response = request_ai(args, TEMP_SYSTEM, build_temp_prompt(changes))
+    user_prompt = prompts.build_user_prompt(changes, args.context)
+    response = request_ai(args, prompts.COMMIT_SYSTEM, user_prompt, prompts.COMMIT_SCHEMA)
     if response is None:
         return EXIT_ERROR
-    print("[DONE] AI 응답 수신\n")
-    print(response.text.strip())
-    # TODO(5~6단계): 커밋 메시지 프롬프트 → 검증 → 구획 출력
+    try:
+        draft = prompts.parse_commit(response.text)
+    except AIError as error:
+        print_error(error.message, error.hint)
+        return EXIT_ERROR
+    print("[DONE] 커밋 메시지 생성 완료\n")
+    print(draft.to_text())
+    # TODO(6단계): 길이·형식 검증 → 재요청/후처리 → 구획 출력
     return EXIT_OK
 
 
@@ -240,12 +274,20 @@ def run_pr(args: argparse.Namespace) -> int:
     report_changes(changes)
     changes = apply_safety(args, changes)
 
-    response = request_ai(args, TEMP_SYSTEM, build_temp_prompt(changes))
+    user_prompt = prompts.build_user_prompt(changes, args.context)
+    response = request_ai(args, prompts.PR_SYSTEM, user_prompt, prompts.PR_SCHEMA)
     if response is None:
         return EXIT_ERROR
-    print("[DONE] AI 응답 수신\n")
-    print(response.text.strip())
-    # TODO(5~6단계): PR 프롬프트 → 검증 → 구획 출력
+    try:
+        draft = prompts.parse_pr(response.text)
+    except AIError as error:
+        print_error(error.message, error.hint)
+        return EXIT_ERROR
+    print("[DONE] PR 초안 생성 완료\n")
+    print(draft.title)
+    print()
+    print(draft.body_text())
+    # TODO(6단계): 길이·형식 검증 → 재요청/후처리 → 구획 출력
     return EXIT_OK
 
 
