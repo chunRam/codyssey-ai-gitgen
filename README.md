@@ -29,7 +29,7 @@ API Key는 **환경변수로만** 읽습니다. 코드나 레포에 키를 적�
 | 공급자 | 환경변수 | 키 발급 | 특징 |
 |---|---|---|---|
 | Google Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey | 무료 티어 있음 (요청 수 제한) |
-| OpenRouter | `OPENROUTER_API_KEY` | https://openrouter.ai/settings/keys | 키 하나로 여러 회사 모델 사용, 크레딧 충전 방식 (`:free` 무료 모델도 있음) |
+| OpenRouter | `OPENROUTER_API_KEY` | https://openrouter.ai/settings/keys | **무료 모델(`:free`)만 사용**하도록 제한됨 (과금 없음) |
 
 셸 설정 파일에 추가하고 다시 불러옵니다.
 
@@ -50,10 +50,13 @@ echo ${GEMINI_API_KEY:0:4} ${OPENROUTER_API_KEY:0:6}
 ```bash
 python3 main.py commit                          # auto: 등록된 키에 따라 자동 선택
 python3 main.py commit --provider openrouter    # OpenRouter 강제
-python3 main.py commit --provider openrouter --model openai/gpt-4o-mini   # 다른 회사 모델
+python3 main.py commit --provider openrouter --model nvidia/nemotron-3-super-120b-a12b:free   # 다른 무료 모델
 ```
 
-OpenRouter의 모델 이름은 `회사/모델` 형식입니다(예: `google/gemini-2.5-flash`, `openai/gpt-4o-mini`). 목록은 https://openrouter.ai/models 에서 확인하세요. 이 도구는 답을 JSON 구조로 받으므로 **structured outputs를 지원하는 모델**을 고르세요.
+**OpenRouter는 무료 모델만 허용합니다.** 과금을 막기 위해 이름이 `:free`로 끝나지 않는 모델은 요청을 보내기 전에 거절합니다.
+- 기본 모델: `nvidia/nemotron-3-ultra-550b-a55b:free` — OpenRouter 주간 사용량 순위(2026-09 기준)에서 가장 많이 쓰이는 무료 모델
+- 무료 모델 목록: https://openrouter.ai/models?max_price=0
+- JSON 구조 강제를 지원하지 않는 모델도 있어서, 프롬프트에 JSON 형식을 지시하고 답변에서 JSON 부분만 뽑아 씁니다.
 
 ## 3. 실행 방법
 
@@ -77,7 +80,7 @@ python3 ~/codyssey-ai-gitgen/main.py pr           # PR 제목/본문 생성
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
 | `--provider` | `auto` | AI 공급자: `auto`, `gemini`, `openrouter` |
-| `--model` | gemini: `gemini-2.5-flash`<br>openrouter: `google/gemini-2.5-flash` | 사용할 모델 |
+| `--model` | gemini: `gemini-2.5-flash`<br>openrouter: `nvidia/nemotron-3-ultra-550b-a55b:free` | 사용할 모델 (openrouter 는 `:free` 모델만) |
 | `--temperature` | `0.3` | 0.0~2.0. 낮을수록 매번 비슷한 결과, 높을수록 표현이 다양해짐 |
 | `--max-tokens` | `2048` | 응답 최대 토큰 수 (추론 토큰 포함) |
 | `--thinking-budget` | `0` | 추론 토큰 예산(gemini-2.5 계열, OpenRouter 추론 모델). `0`=끔, `-1`=모델이 자동 결정 |
@@ -272,7 +275,7 @@ AI의 답을 그대로 쓰지 않고 아래 규칙으로 검사합니다.
 | 1회 실행당 호출 수 | **최대 2회** (첫 요청 1회 + 형식 위반 시 재요청 1회). 실행할 때마다 `[INFO] AI API 호출 횟수`로 표시 |
 | 변경 없음 | AI를 호출하지 않고 종료 |
 | 토큰 사용량 | 실행할 때마다 `입력 / 출력 / 추론` 토큰 수를 표시. 비용은 토큰 수에 비례 |
-| OpenRouter 크레딧 | 사용량만큼 크레딧이 차감됩니다. 크레딧이 부족하면 `HTTP 402` 안내가 나오며, `:free`로 끝나는 무료 모델을 `--model`로 지정할 수도 있습니다 |
+| OpenRouter 무료 모델 | 과금은 없지만 분당·일일 요청 수 제한이 있습니다(계정 상태에 따라 다름, [공식 문서](https://openrouter.ai/docs/api-reference/limits)). 초과하면 `HTTP 429` 안내가 나옵니다 |
 | Gemini 무료 티어 한도 | 모델별로 요청 수 제한이 있습니다. 개발 중 `gemini-2.5-flash` 무료 티어에서 **요청 20회 한도**를 넘어 `HTTP 429`가 발생했습니다. 최신 한도는 [공식 문서](https://ai.google.dev/gemini-api/docs/rate-limits)를 확인하세요 |
 
 **권장 사용법**
