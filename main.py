@@ -10,6 +10,9 @@ from __future__ import annotations
 import argparse
 import sys
 
+import git_utils
+from git_utils import GitChanges, GitError
+
 # 기본 API 파라미터 (CLI 옵션으로 덮어쓸 수 있다)
 DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_TEMPERATURE = 0.3
@@ -103,24 +106,64 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def print_options(args: argparse.Namespace) -> None:
-    print(f"[INFO] command     = {args.command}")
-    print(f"[INFO] model       = {args.model}")
-    print(f"[INFO] temperature = {args.temperature}")
-    print(f"[INFO] max_tokens  = {args.max_tokens}")
-    print(f"[INFO] safe_mode   = {args.safe_mode}")
+def print_error(message: str, hint: str = "") -> None:
+    print(f"[ERROR] {message}", file=sys.stderr)
+    if hint:
+        print(f"[HINT] {hint}", file=sys.stderr)
+
+
+def print_settings(args: argparse.Namespace) -> None:
+    print(
+        f"[INFO] 설정: model={args.model}, temperature={args.temperature}, "
+        f"max_tokens={args.max_tokens}, safe_mode={args.safe_mode}"
+    )
+
+
+def report_changes(changes: GitChanges) -> None:
+    """수집한 git 변경 사항을 요약해서 보여준다."""
+    print(f"[INFO] Git status 수집 완료: {len(changes.files)}개 파일 변경 감지")
+    for change in changes.files:
+        print(f"         {change.status:>2} {change.path}")
+    print(
+        f"[INFO] Git diff 수집 완료: {changes.diff_line_count}줄 "
+        f"({changes.diff_source})"
+    )
 
 
 def run_commit(args: argparse.Namespace) -> int:
-    print_options(args)
-    # TODO(2~6단계): git 수집 → safe-mode → AI 호출 → 검증 → 출력
+    print_settings(args)
+    try:
+        git_utils.ensure_repo_root()
+        changes = git_utils.collect_commit_changes()
+    except GitError as error:
+        print_error(error.message, error.hint)
+        return EXIT_ERROR
+
+    if changes.is_empty:
+        print("[INFO] 변경 사항이 없습니다. 커밋 메시지를 생성하지 않고 종료합니다.")
+        return EXIT_OK
+    report_changes(changes)
+    if not changes.diff.strip():
+        print("[HINT] 새 파일만 있어 diff 가 비어 있습니다. git add 후 실행하면 파일 내용까지 반영됩니다.")
+    # TODO(3~6단계): safe-mode → AI 호출 → 검증 → 출력
     return EXIT_OK
 
 
 def run_pr(args: argparse.Namespace) -> int:
-    print_options(args)
-    print(f"[INFO] base        = {args.base}")
-    # TODO(2~6단계): git 수집 → safe-mode → AI 호출 → 검증 → 출력
+    print_settings(args)
+    try:
+        git_utils.ensure_repo_root()
+        changes = git_utils.collect_pr_changes(args.base)
+    except GitError as error:
+        print_error(error.message, error.hint)
+        return EXIT_ERROR
+
+    print(f"[INFO] 현재 브랜치: {changes.branch or '(detached HEAD)'} (기준: {args.base})")
+    if changes.is_empty:
+        print("[INFO] 변경 사항이 없습니다. PR 초안을 생성하지 않고 종료합니다.")
+        return EXIT_OK
+    report_changes(changes)
+    # TODO(3~6단계): safe-mode → AI 호출 → 검증 → 출력
     return EXIT_OK
 
 
