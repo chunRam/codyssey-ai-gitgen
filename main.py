@@ -11,10 +11,12 @@ import argparse
 import sys
 
 import ai_client
+import formatter
 import git_utils
 import prompts
 import safety
-from ai_client import AIError, AIResponse
+from ai_client import AIError, AIResponse, GeminiClient
+from formatter import ValidationResult
 from git_utils import GitChanges, GitError
 
 # 기본 API 파라미터 (CLI 옵션으로 덮어쓸 수 있다)
@@ -24,6 +26,7 @@ DEFAULT_MAX_TOKENS = 2048
 DEFAULT_THINKING_BUDGET = 0  # 0 = 추론 끔 (gemini-2.5 계열에만 적용)
 DEFAULT_BASE_BRANCH = "main"
 MAX_LISTED_FILES = 10  # 화면에 나열할 변경 파일 수
+MAX_API_CALLS = 2      # 1회 실행당 최대 AI 호출 수 (첫 요청 1 + 검증 실패 시 재요청 1)
 
 # 종료 코드: 0 = 정상, 그 외 = 오류
 EXIT_OK = 0
@@ -191,26 +194,26 @@ def apply_safety(args: argparse.Namespace, changes: GitChanges) -> GitChanges:
     return safe_changes
 
 
-def request_ai(
-    args: argparse.Namespace, system: str, prompt: str, schema: dict
-) -> AIResponse | None:
-    """AI 를 호출하고 응답을 돌려준다. 실패하면 오류를 출력하고 None."""
+def create_client(args: argparse.Namespace) -> GeminiClient | None:
     try:
-        client = ai_client.GeminiClient(
+        return ai_client.GeminiClient(
             args.model, args.temperature, args.max_tokens, args.thinking_budget
         )
     except AIError as error:  # API Key 미설정
         print_error(error.message, error.hint)
         return None
 
-    print(f"[INFO] AI API 요청 중... (model={args.model})")
+
+def call_ai(
+    client: GeminiClient, system: str, prompt: str, schema: dict
+) -> AIResponse | None:
+    """AI 를 1회 호출한다. 실패하거나 답변이 잘리면 오류를 출력하고 None."""
+    print(f"[INFO] AI API 요청 중... (model={client.model})")
     try:
         response = client.generate(system, prompt, schema)
     except AIError as error:
         print_error(error.message, error.hint)
         return None
-    finally:
-        print(f"[INFO] AI API 호출 횟수: {client.call_count}회")
 
     print(
         f"[INFO] 토큰 사용량: 입력 {response.prompt_tokens} / 출력 {response.output_tokens}"
@@ -219,11 +222,65 @@ def request_ai(
     if response.finish_reason == "MAX_TOKENS":
         # JSON 답변이 중간에 잘리면 쓸 수 없으므로 오류로 처리한다.
         print_error(
-            f"답변이 길이 제한({args.max_tokens} 토큰)에 걸려 중간에 잘렸습니다.",
+            f"답변이 길이 제한({client.max_tokens} 토큰)에 걸려 중간에 잘렸습니다.",
             "--max-tokens 를 늘리거나 --thinking-budget 0 으로 추론을 끄세요.",
         )
         return None
     return response
+
+
+def generate_draft(args, system, user_prompt, schema, parse, validate):
+    """AI 로 초안을 만들고 검증한다. 규칙을 어기면 위반 내용을 알려주고 1회 재요청한다.
+
+    돌려주는 값: (초안, 마지막 검증 결과). 유효한 초안을 얻지 못하면 None.
+    """
+    client = create_client(args)
+    if client is None:
+        return None
+
+    prompt = user_prompt
+    draft, result = None, None
+    try:
+        for attempt in range(1, MAX_API_CALLS + 1):
+            response = call_ai(client, system, prompt, schema)
+            if response is None:
+                return None
+            try:
+                draft = parse(response.text)
+                result = validate(draft)
+            except AIError as error:  # JSON 이 아닌 답변
+                result = ValidationResult(errors=[error.message])
+
+            if result.ok:
+                print("[CHECK] 형식 검증 통과")
+                break
+            print(f"[CHECK] 규칙 위반 {len(result.errors)}건:")
+            for error in result.errors:
+                print(f"         - {error}")
+            if attempt < MAX_API_CALLS:
+                print("[INFO] 위반 내용을 알려주고 1회 재요청합니다.")
+                prompt = prompts.build_retry_prompt(user_prompt, response.text, result.errors)
+    finally:
+        print(f"[INFO] AI API 호출 횟수: {client.call_count}회 (최대 {MAX_API_CALLS}회)")
+
+    if draft is None:
+        print_error("AI 로부터 올바른 형식의 답변을 받지 못했습니다.", "다시 실행해 보세요.")
+        return None
+    return draft, result
+
+
+def finalize(draft, result: ValidationResult, fix, validate):
+    """재요청 후에도 남은 위반은 후처리로 다듬고, 그래도 남는 문제와 권장 사항은 경고로 알린다."""
+    if not result.ok:
+        draft, notes = fix(draft)
+        for note in notes:
+            print(f"[FIX] {note}")
+        result = validate(draft)
+    for error in result.errors:
+        print(f"[WARN] {error} 직접 수정이 필요합니다.")
+    for warning in result.warnings:
+        print(f"[WARN] {warning}")
+    return draft
 
 
 def run_commit(args: argparse.Namespace) -> int:
@@ -244,17 +301,16 @@ def run_commit(args: argparse.Namespace) -> int:
     changes = apply_safety(args, changes)
 
     user_prompt = prompts.build_user_prompt(changes, args.context)
-    response = request_ai(args, prompts.COMMIT_SYSTEM, user_prompt, prompts.COMMIT_SCHEMA)
-    if response is None:
+    generated = generate_draft(
+        args, prompts.COMMIT_SYSTEM, user_prompt, prompts.COMMIT_SCHEMA,
+        prompts.parse_commit, formatter.validate_commit,
+    )
+    if generated is None:
         return EXIT_ERROR
-    try:
-        draft = prompts.parse_commit(response.text)
-    except AIError as error:
-        print_error(error.message, error.hint)
-        return EXIT_ERROR
+    draft = finalize(*generated, formatter.fix_commit, formatter.validate_commit)
+
     print("[DONE] 커밋 메시지 생성 완료\n")
-    print(draft.to_text())
-    # TODO(6단계): 길이·형식 검증 → 재요청/후처리 → 구획 출력
+    print(formatter.render_commit(draft))
     return EXIT_OK
 
 
@@ -275,19 +331,16 @@ def run_pr(args: argparse.Namespace) -> int:
     changes = apply_safety(args, changes)
 
     user_prompt = prompts.build_user_prompt(changes, args.context)
-    response = request_ai(args, prompts.PR_SYSTEM, user_prompt, prompts.PR_SCHEMA)
-    if response is None:
+    generated = generate_draft(
+        args, prompts.PR_SYSTEM, user_prompt, prompts.PR_SCHEMA,
+        prompts.parse_pr, formatter.validate_pr,
+    )
+    if generated is None:
         return EXIT_ERROR
-    try:
-        draft = prompts.parse_pr(response.text)
-    except AIError as error:
-        print_error(error.message, error.hint)
-        return EXIT_ERROR
+    draft = finalize(*generated, formatter.fix_pr, formatter.validate_pr)
+
     print("[DONE] PR 초안 생성 완료\n")
-    print(draft.title)
-    print()
-    print(draft.body_text())
-    # TODO(6단계): 길이·형식 검증 → 재요청/후처리 → 구획 출력
+    print(formatter.render_pr(draft))
     return EXIT_OK
 
 
