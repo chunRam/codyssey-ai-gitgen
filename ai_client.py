@@ -197,9 +197,11 @@ class GeminiClient(BaseClient):
         return self.api_url.format(model=self.model), headers, body
 
     def http_error(self, code, detail):
-        if code == 400 and "API key" in detail:
+        # 형식이 틀린 키는 400, 삭제·만료된 키는 401 로 거부된다.
+        if (code == 400 and "API key" in detail) or code == 401:
             return AIError(f"API Key 가 유효하지 않습니다 [HTTP {code}] ({detail})",
-                           f"{self.key_env} 값을 확인하거나 키를 재발급하세요.")
+                           f"{self.key_env} 의 키가 삭제·만료되었거나 잘못 입력되었을 수 있습니다. "
+                           "https://aistudio.google.com/apikey 에서 사용 중인 키를 확인하거나 재발급하세요.")
         return None
 
     def parse_response(self, data):
